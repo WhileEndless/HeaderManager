@@ -7,6 +7,13 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.awt.event.ItemListener;
+import javax.swing.event.DocumentListener;
+import javax.swing.event.DocumentEvent;
+import java.util.Base64;
 
 public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
     private IBurpExtenderCallbacks callbacks;
@@ -16,18 +23,33 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
     private JCheckBox inScopeCheckBox;
     private JCheckBox enabledCheckBox;
     private Map<Integer, JCheckBox> toolCheckboxes;
+    
+    // Profile management components
+    private JTextField profileNameField;
+    private JComboBox<String> profileSelector;
+    private JButton saveProfileButton;
+    private JButton deleteProfileButton;
+    private String currentProfile = "Default";
+    private Set<String> profileList = new LinkedHashSet<>();
+    private boolean isLoadingProfile = false;
+    
+    private static final String PROFILE_LIST_KEY = "headerManager_profileList";
+    private static final String LAST_PROFILE_KEY = "headerManager_lastProfile";
+    private static final String VERSION = "1.1";
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
         
-        callbacks.setExtensionName("Header Manager");
+        callbacks.setExtensionName("Header Manager v" + VERSION);
         
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
                 initializeUI();
+                loadProfileList();
+                loadLastProfile();
             }
         });
 
@@ -41,11 +63,39 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         JPanel topPanel = new JPanel();
         topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
         
+        // Profile management panel
+        JPanel profilePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        profilePanel.setBorder(BorderFactory.createTitledBorder("Profile Management"));
+        
+        JLabel profileLabel = new JLabel("Profile Name:");
+        profileNameField = new JTextField(10);
+        saveProfileButton = new JButton("Save");
+        
+        profileSelector = new JComboBox<>();
+        profileSelector.setPreferredSize(new Dimension(150, profileSelector.getPreferredSize().height));
+        
+        deleteProfileButton = new JButton("Delete");
+        
+        profilePanel.add(profileLabel);
+        profilePanel.add(profileNameField);
+        profilePanel.add(saveProfileButton);
+        profilePanel.add(new JLabel("Load Profile:"));
+        profilePanel.add(profileSelector);
+        profilePanel.add(deleteProfileButton);
+        
+        // Version label
+        JLabel versionLabel = new JLabel("v" + VERSION);
+        versionLabel.setForeground(Color.GRAY);
+        profilePanel.add(Box.createHorizontalStrut(10));
+        profilePanel.add(versionLabel);
+        
+        topPanel.add(profilePanel);
+        
+        // Initialize rest of UI
         JPanel enablePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         enabledCheckBox = new JCheckBox("Enable Extension", false);
         enabledCheckBox.setForeground(Color.RED);
         enablePanel.add(enabledCheckBox);
-        
         
         enabledCheckBox.addItemListener(e -> {
             if (enabledCheckBox.isSelected()) {
@@ -53,6 +103,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
             } else {
                 enabledCheckBox.setForeground(Color.RED);
             }
+            saveCurrentProfile();
         });
         
         topPanel.add(enablePanel);
@@ -60,6 +111,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         JPanel scopePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         inScopeCheckBox = new JCheckBox("In Scope Only", true);
         scopePanel.add(inScopeCheckBox);
+        inScopeCheckBox.addItemListener(e -> saveCurrentProfile());
         topPanel.add(scopePanel);
 
         JPanel toolsPanel = new JPanel(new GridLayout(0, 3, 5, 5));
@@ -81,8 +133,14 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         JButton selectAllButton = new JButton("Select All");
         JButton deselectAllButton = new JButton("Deselect All");
         
-        selectAllButton.addActionListener(e -> setAllToolsSelection(true));
-        deselectAllButton.addActionListener(e -> setAllToolsSelection(false));
+        selectAllButton.addActionListener(e -> {
+            setAllToolsSelection(true);
+            saveCurrentProfile();
+        });
+        deselectAllButton.addActionListener(e -> {
+            setAllToolsSelection(false);
+            saveCurrentProfile();
+        });
         
         buttonPanel.add(selectAllButton);
         buttonPanel.add(deselectAllButton);
@@ -107,6 +165,24 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         String exampleHeaders = "";
         headersTextArea.setText(exampleHeaders);
         
+        // Add document listener for headers text area
+        headersTextArea.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                saveCurrentProfile();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                saveCurrentProfile();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                saveCurrentProfile();
+            }
+        });
+        
         headersPanel.add(scrollPane, BorderLayout.CENTER);
         mainPanel.add(headersPanel, BorderLayout.CENTER);
 
@@ -115,12 +191,24 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         statusPanel.add(statusLabel, BorderLayout.WEST);
         mainPanel.add(statusPanel, BorderLayout.SOUTH);
 
+        // Profil yönetimi için olay dinleyicileri ekle
+        saveProfileButton.addActionListener(e -> saveProfile());
+        profileSelector.addActionListener(e -> {
+            if (!isLoadingProfile && profileSelector.getSelectedItem() != null) {
+                currentProfile = profileSelector.getSelectedItem().toString();
+                loadProfile(currentProfile);
+                callbacks.saveExtensionSetting(LAST_PROFILE_KEY, currentProfile);
+            }
+        });
+        deleteProfileButton.addActionListener(e -> deleteCurrentProfile());
+
         callbacks.customizeUiComponent(mainPanel);
         callbacks.addSuiteTab(this);
     }
 
     private void addToolCheckbox(JPanel panel, String name, int toolFlag) {
         JCheckBox checkbox = new JCheckBox(name, true);
+        checkbox.addItemListener(e -> saveCurrentProfile());
         toolCheckboxes.put(toolFlag, checkbox);
         panel.add(checkbox);
     }
@@ -194,5 +282,222 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         } catch (Exception e) {
             callbacks.printError("Error processing headers: " + e.getMessage());
         }
+    }
+    
+    // Profile management methods
+    
+    private void saveProfile() {
+        String profileName = profileNameField.getText().trim();
+        if (profileName.isEmpty()) {
+            JOptionPane.showMessageDialog(mainPanel, "Please enter a profile name", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        
+        currentProfile = profileName;
+        saveCurrentProfile();
+        
+        // Update profile list
+        profileList.add(currentProfile);
+        saveProfileList();
+        
+        // Update profile selector and keep current selection
+        isLoadingProfile = true;
+        updateProfileSelector();
+        profileSelector.setSelectedItem(currentProfile);
+        isLoadingProfile = false;
+        
+        // Save as last used profile
+        callbacks.saveExtensionSetting(LAST_PROFILE_KEY, currentProfile);
+        
+        JOptionPane.showMessageDialog(mainPanel, "Profile saved successfully", "Success", JOptionPane.INFORMATION_MESSAGE);
+    }
+    
+    private void saveCurrentProfile() {
+        if (isLoadingProfile || callbacks == null) return;
+        
+        try {
+            StringBuilder settingsBuilder = new StringBuilder();
+            
+            // Save enabled state
+            settingsBuilder.append("enabled=").append(enabledCheckBox.isSelected()).append("\n");
+            
+            // Save in scope only state
+            settingsBuilder.append("inScopeOnly=").append(inScopeCheckBox.isSelected()).append("\n");
+            
+            // Save tool selections
+            for (Map.Entry<Integer, JCheckBox> entry : toolCheckboxes.entrySet()) {
+                settingsBuilder.append("tool_").append(entry.getKey()).append("=")
+                    .append(entry.getValue().isSelected()).append("\n");
+            }
+            
+            // Save headers - Base64 encode to handle newlines and special characters
+            String encodedHeaders = Base64.getEncoder().encodeToString(
+                headersTextArea.getText().getBytes("UTF-8"));
+            settingsBuilder.append("headers=").append(encodedHeaders);
+            
+            // Save to extension settings
+            callbacks.saveExtensionSetting("headerManager_profile_" + currentProfile, 
+                settingsBuilder.toString());
+            
+        } catch (Exception e) {
+            callbacks.printError("Error saving profile: " + e.getMessage());
+        }
+    }
+    
+    private void loadProfile(String profileName) {
+        isLoadingProfile = true;
+        try {
+            String settingsStr = callbacks.loadExtensionSetting("headerManager_profile_" + profileName);
+            
+            if (settingsStr != null && !settingsStr.isEmpty()) {
+                Map<String, String> settings = new HashMap<>();
+                
+                // Parse settings
+                for (String line : settingsStr.split("\\n")) {
+                    if (line.contains("=")) {
+                        String[] parts = line.split("=", 2);
+                        settings.put(parts[0], parts[1]);
+                    }
+                }
+                
+                // Load enabled state
+                if (settings.containsKey("enabled")) {
+                    enabledCheckBox.setSelected(Boolean.parseBoolean(settings.get("enabled")));
+                }
+                
+                // Load in scope only state
+                if (settings.containsKey("inScopeOnly")) {
+                    inScopeCheckBox.setSelected(Boolean.parseBoolean(settings.get("inScopeOnly")));
+                }
+                
+                // Load tool selections
+                for (Map.Entry<Integer, JCheckBox> entry : toolCheckboxes.entrySet()) {
+                    String key = "tool_" + entry.getKey();
+                    if (settings.containsKey(key)) {
+                        entry.getValue().setSelected(Boolean.parseBoolean(settings.get(key)));
+                    }
+                }
+                
+                // Load headers
+                if (settings.containsKey("headers")) {
+                    try {
+                        byte[] decodedBytes = Base64.getDecoder().decode(settings.get("headers"));
+                        headersTextArea.setText(new String(decodedBytes, "UTF-8"));
+                    } catch (Exception e) {
+                        callbacks.printError("Error decoding headers: " + e.getMessage());
+                    }
+                }
+            }
+            
+            profileNameField.setText(profileName);
+            
+        } catch (Exception e) {
+            callbacks.printError("Error loading profile: " + e.getMessage());
+        } finally {
+            isLoadingProfile = false;
+        }
+    }
+    
+    private void deleteCurrentProfile() {
+        if (profileSelector.getItemCount() <= 1) {
+            JOptionPane.showMessageDialog(mainPanel, "Cannot delete the last profile", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        
+        String profileToDelete = profileSelector.getSelectedItem().toString();
+        
+        int confirm = JOptionPane.showConfirmDialog(
+            mainPanel,
+            "Are you sure you want to delete the profile \"" + profileToDelete + "\"?",
+            "Delete Confirmation",
+            JOptionPane.YES_NO_OPTION
+        );
+        
+        if (confirm == JOptionPane.YES_OPTION) {
+            // Remove from profile list
+            profileList.remove(profileToDelete);
+            
+            // Delete settings
+            callbacks.saveExtensionSetting("headerManager_profile_" + profileToDelete, null);
+            
+            // Update profile selector
+            saveProfileList();
+            updateProfileSelector();
+            
+            // Load first available profile
+            if (profileSelector.getItemCount() > 0) {
+                String newProfile = profileSelector.getItemAt(0);
+                currentProfile = newProfile;
+                profileSelector.setSelectedItem(newProfile);
+                loadProfile(newProfile);
+                callbacks.saveExtensionSetting(LAST_PROFILE_KEY, newProfile);
+            }
+        }
+    }
+    
+    private void loadProfileList() {
+        String profileListStr = callbacks.loadExtensionSetting(PROFILE_LIST_KEY);
+        
+        if (profileListStr != null && !profileListStr.isEmpty()) {
+            String[] profiles = profileListStr.split(",");
+            profileList.clear();
+            
+            for (String profile : profiles) {
+                profileList.add(profile);
+            }
+        }
+        
+        if (profileList.isEmpty()) {
+            // Add default profile if list is empty
+            profileList.add("Default");
+        }
+        
+        updateProfileSelector();
+    }
+    
+    private void saveProfileList() {
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        
+        for (String profile : profileList) {
+            if (!first) {
+                sb.append(",");
+            }
+            sb.append(profile);
+            first = false;
+        }
+        
+        callbacks.saveExtensionSetting(PROFILE_LIST_KEY, sb.toString());
+    }
+    
+    private void updateProfileSelector() {
+        String currentSelection = (String) profileSelector.getSelectedItem();
+        
+        profileSelector.removeAllItems();
+        List<String> sortedProfiles = new ArrayList<>(profileList);
+        java.util.Collections.sort(sortedProfiles);
+        
+        for (String profile : sortedProfiles) {
+            profileSelector.addItem(profile);
+        }
+        
+        // Keep the current selection if it still exists
+        if (currentSelection != null && profileList.contains(currentSelection)) {
+            profileSelector.setSelectedItem(currentSelection);
+        }
+    }
+    
+    private void loadLastProfile() {
+        String lastProfile = callbacks.loadExtensionSetting(LAST_PROFILE_KEY);
+        
+        if (lastProfile != null && !lastProfile.isEmpty() && profileList.contains(lastProfile)) {
+            currentProfile = lastProfile;
+            profileSelector.setSelectedItem(currentProfile);
+        } else if (profileSelector.getItemCount() > 0) {
+            currentProfile = profileSelector.getItemAt(0).toString();
+            profileSelector.setSelectedItem(currentProfile);
+        }
+        
+        loadProfile(currentProfile);
     }
 }
